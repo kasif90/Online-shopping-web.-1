@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════
-   GEN-Z STORE — app.js (FINAL FIRESTORE VERSION)
+   GEN-Z STORE — app.js (REALTIME DATABASE FIXED VERSION)
 ═══════════════════════════════════════════════════════ */
 
 // Service Account Details
@@ -55,6 +55,146 @@ let currentSelectedSize = null;
 let isAppInitialized = false;
 let activeAdminOrderTab = "Recent";
 let bannerScrollInterval = null;
+
+// ============================================================================
+// 🔥 REALTIME DATABASE ADAPTER & ANTI-HANG FIX (BYPASSES FIRESTORE ISSUES) 🔥
+// ============================================================================
+const RTDB_URL = "https://st-online-shopping-website-default-rtdb.firebaseio.com";
+
+// 1. Mock Firestore calls to use Realtime DB Seamlessly
+window.fbDb = "RTDB";
+window.fbCollection = (db, col) => col;
+window.fbDoc = (db, col, id) => `${col}/${id}`;
+
+window.fbAddDoc = async (col, data) => {
+    data.timestamp = Date.now();
+    const res = await fetch(`${RTDB_URL}/${col}.json`, { method: 'POST', body: JSON.stringify(data) });
+    const json = await res.json();
+    setTimeout(window.loadFromRTDB, 500);
+    return { id: json.name };
+};
+window.fbUpdateDoc = async (path, data) => {
+    await fetch(`${RTDB_URL}/${path}.json`, { method: 'PATCH', body: JSON.stringify(data) });
+    setTimeout(window.loadFromRTDB, 500);
+};
+window.fbDeleteDoc = async (path) => {
+    await fetch(`${RTDB_URL}/${path}.json`, { method: 'DELETE' });
+    setTimeout(window.loadFromRTDB, 500);
+};
+
+// 2. Global Load Function for Products, Shops, Categories & Banners from RTDB
+window.loadFromRTDB = async () => {
+    try {
+        const [p, s, c, b] = await Promise.all([
+            fetch(`${RTDB_URL}/products.json`).then(r=>r.json()),
+            fetch(`${RTDB_URL}/shops.json`).then(r=>r.json()),
+            fetch(`${RTDB_URL}/categories.json`).then(r=>r.json()),
+            fetch(`${RTDB_URL}/banners.json`).then(r=>r.json())
+        ]);
+        if(p) window.updateProductsFromFirebase(Object.keys(p).map(k=>({...p[k], id: k})));
+        if(s) window.updateShopsFromFirebase(Object.keys(s).map(k=>({...s[k], id: k})));
+        if(c) window.updateCategoriesFromFirebase(Object.keys(c).map(k=>({...c[k], id: k})));
+        if(b) window.updateBannersFromFirebase(Object.keys(b).map(k=>({...b[k], id: k})));
+    } catch(e) { console.error("RTDB Load Error:", e); }
+};
+
+// 3. Override Direct Core Functions (Products, Orders, Categories)
+window.updateProductInFirebase = async (id, data) => {
+    await fetch(`${RTDB_URL}/products/${id}.json`, { method: 'PATCH', body: JSON.stringify(data) });
+    window.loadFromRTDB();
+};
+window.deleteProductFromFirebase = async (id) => {
+    await fetch(`${RTDB_URL}/products/${id}.json`, { method: 'DELETE' });
+    window.loadFromRTDB();
+};
+window.saveCategoriesToFirebase = async (cats) => {
+    await fetch(`${RTDB_URL}/categories.json`, { method: 'PUT', body: JSON.stringify(cats) });
+};
+window.saveBannersToFirebase = async (banners) => {
+    await fetch(`${RTDB_URL}/banners.json`, { method: 'PUT', body: JSON.stringify(banners) });
+};
+window.saveOrderToFirebase = async (orderData) => {
+    try {
+        const res = await fetch(`${RTDB_URL}/orders.json`, { method: 'POST', body: JSON.stringify(orderData) });
+        const json = await res.json();
+        return !!json.name;
+    } catch(e) { return false; }
+};
+window.updateOrderStatusInFirebase = async (id, status) => { await fetch(`${RTDB_URL}/orders/${id}.json`, { method: 'PATCH', body: JSON.stringify({status}) }); };
+window.deleteOrderFromFirebase = async (id) => { await fetch(`${RTDB_URL}/orders/${id}.json`, { method: 'DELETE' }); };
+window.fetchOrdersFromFirebase = async () => {
+    try {
+        const res = await fetch(`${RTDB_URL}/orders.json`);
+        const data = await res.json();
+        if(data) {
+            window.allFirebaseOrders = Object.keys(data).map(k=>({...data[k], id:k})).sort((a,b) => (b.savedAt||0) - (a.savedAt||0));
+            if($("adminOrdersList")) window.renderAdminOrders(window.allFirebaseOrders);
+            if($("myOrdersList")) window.renderMyOrders();
+        }
+    } catch(e) { console.error(e); }
+};
+
+// 4. THE ULTIMATE ANTI-HANG MECHANISM (Catches stuck "Listing..." button and forces save)
+window.addEventListener('DOMContentLoaded', () => {
+    window.loadFromRTDB();
+    window.fetchOrdersFromFirebase();
+    
+    setInterval(async () => {
+        const buttons = document.querySelectorAll('button');
+        for(let btn of buttons) {
+            if(btn.textContent === 'Listing...') {
+                if(!btn.dataset.listingStart) btn.dataset.listingStart = Date.now();
+                // Agar button 2.5 seconds se zyada atka hai, force save karo!
+                if(Date.now() - parseInt(btn.dataset.listingStart) > 2500) {
+                    btn.textContent = 'Add Product';
+                    btn.dataset.listingStart = '';
+                    
+                    try {
+                        const name = $("newPName") ? $("newPName").value.trim() : $("addPName") ? $("addPName").value.trim() : "";
+                        const imgRaw = $("newPImage") ? $("newPImage").value.trim() : $("addPImage") ? $("addPImage").value.trim() : "";
+                        const price = $("newPPrice") ? Number($("newPPrice").value) : 0;
+                        
+                        if(name && imgRaw && price > 0) {
+                            const imgArray = imgRaw.split(",").map(s=>s.trim()).filter(Boolean);
+                            const productData = {
+                                name: name,
+                                image: imgArray,
+                                price: price,
+                                discount: $("newPDiscount") ? Number($("newPDiscount").value) || 0 : 0,
+                                extra: $("newPExtra") ? Number($("newPExtra").value) || 0 : 0,
+                                sizesIn: $("newPSizesIn") ? $("newPSizesIn").value.trim() : "",
+                                sizesOut: $("newPSizesOut") ? $("newPSizesOut").value.trim() : "",
+                                color: $("newPColor") ? $("newPColor").value.trim() : "",
+                                groupId: $("newPGroupId") ? $("newPGroupId").value.trim() : "",
+                                inStock: $("newInStock") ? $("newInStock").checked : true,
+                                freeDelivery: $("newPFreeDelivery") ? $("newPFreeDelivery").checked : true,
+                                shopId: $("pShop") ? $("pShop").value : "GLOBAL",
+                                mainCategoryId: $("pMainCat") ? $("pMainCat").value : "",
+                                timestamp: Date.now()
+                            };
+                            
+                            // Send directly to Realtime Database
+                            await fetch(`${RTDB_URL}/products.json`, { method: 'POST', body: JSON.stringify(productData) });
+                            alert('✅ Product successfully saved to Realtime Database & Live on Website!');
+                            window.loadFromRTDB(); // UI Refresh
+                            
+                            // Clear all form inputs
+                            ["newPName", "newPImage", "newPPrice", "newPDiscount", "newPExtra", "newPSizesIn", "newPSizesOut", "newPColor", "newPGroupId", "addPName", "addPImage"].forEach(id => {
+                                if($(id)) $(id).value = "";
+                            });
+                        } else {
+                            alert("Bhai, Listing Error theek ho gaya, par Name, Image, aur Price sahi se fill karo!");
+                        }
+                    } catch(e) { console.error("Force Save Error", e); }
+                }
+            } else {
+                btn.dataset.listingStart = '';
+            }
+        }
+    }, 1000);
+});
+// ============================================================================
+
 
 let currentTheme = load("knk_app_theme", "dark");
 window.setAppTheme = function(t) {
@@ -141,7 +281,7 @@ window.addEventListener("DOMContentLoaded", () => {
           const shopSel = $("newCatShop"); const sId = shopSel ? shopSel.value : "GLOBAL";
           if (!n) return alert("Category ka naam daalein!");
           mainCategories.push({ id: genId(), name: n, shopId: sId });
-          saveCategories(); $("newCatName").value = ""; renderAdmin(); renderMainCats();
+          saveCategories(mainCategories); $("newCatName").value = ""; renderAdmin(); renderMainCats();
       };
   }
 
@@ -1173,8 +1313,6 @@ $("adminClose").onclick = () => {
     if ($("adminProducts") && $("adminProducts").parentElement) { $("adminProducts").parentElement.classList.add("hidden"); }
 };
 
-function saveCategories() { if (window.saveCategoriesToFirebase) { window.saveCategoriesToFirebase(mainCategories); } }
-
 if ($("addBannerBtn")) {
     $("addBannerBtn").onclick = async () => {
         const i = $("newBannerImg").value.trim(); const l = $("newBannerLink").value.trim();
@@ -1255,7 +1393,7 @@ function renderCatMgmt() {
     `;
     card.querySelector(".del-cat-btn").onclick = () => {
         if(confirm(`Are you sure you want to permanently delete the category "${cat.name}"?`)) {
-            mainCategories = mainCategories.filter(c => c.id !== cat.id); saveCategories(); renderAdmin(); renderMainCats(); renderProducts();
+            mainCategories = mainCategories.filter(c => c.id !== cat.id); saveCategories(mainCategories); renderAdmin(); renderMainCats(); renderProducts();
         }
     };
     list.appendChild(card);
